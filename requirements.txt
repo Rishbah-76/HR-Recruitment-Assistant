@@ -1,0 +1,8 @@
+langchain
+langchain-ollama
+langchain-community
+ollama
+streamlit
+python-dotenv
+pydantic
+pypdf

@@ -61,19 +61,32 @@ class Database:
             except sqlite3.OperationalError as e:
                 print(f"Could not create vector index: {e}")
         
-        # Create job-candidate matches table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id INTEGER NOT NULL,
-            candidate_id INTEGER NOT NULL,
-            score REAL NOT NULL,
-            is_shortlisted BOOLEAN DEFAULT 0,
-            email_sent BOOLEAN DEFAULT 0,
-            FOREIGN KEY (job_id) REFERENCES jobs (id),
-            FOREIGN KEY (candidate_id) REFERENCES candidates (id)
-        )
-        ''')
+        # Create job-candidate matches table with details column
+        # Check if the matches table already exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='matches'")
+        if cursor.fetchone():
+            # Check if the details column exists
+            cursor.execute("PRAGMA table_info(matches)")
+            columns = [info[1] for info in cursor.fetchall()]
+            if "details" not in columns:
+                # Add details column to existing table
+                cursor.execute("ALTER TABLE matches ADD COLUMN details JSON")
+                print("Added details column to matches table")
+        else:
+            # Create new matches table with details column
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                candidate_id INTEGER NOT NULL,
+                score REAL NOT NULL,
+                is_shortlisted BOOLEAN DEFAULT 0,
+                email_sent BOOLEAN DEFAULT 0,
+                details JSON,
+                FOREIGN KEY (job_id) REFERENCES jobs (id),
+                FOREIGN KEY (candidate_id) REFERENCES candidates (id)
+            )
+            ''')
         
         self.conn.commit()
     
@@ -121,12 +134,12 @@ class Database:
         self.conn.commit()
         return cursor.lastrowid
     
-    def add_match(self, job_id: int, candidate_id: int, score: float) -> int:
-        """Record a match between a job and candidate"""
+    def add_match(self, job_id: int, candidate_id: int, score: float, details: str = None) -> int:
+        """Record a match between a job and candidate with optional details"""
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO matches (job_id, candidate_id, score) VALUES (?, ?, ?)",
-            (job_id, candidate_id, score)
+            "INSERT INTO matches (job_id, candidate_id, score, details) VALUES (?, ?, ?, ?)",
+            (job_id, candidate_id, score, details)
         )
         self.conn.commit()
         return cursor.lastrowid
@@ -249,18 +262,27 @@ class Database:
         """Get shortlisted candidates for a job with score above threshold"""
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT m.id, c.id, c.name, m.score FROM matches m "
+            "SELECT m.id, c.id, c.name, m.score, m.details FROM matches m "
             "JOIN candidates c ON m.candidate_id = c.id "
             "WHERE m.job_id = ? AND m.score >= ? ORDER BY m.score DESC",
             (job_id, threshold)
         )
         results = []
         for row in cursor.fetchall():
+            match_id, candidate_id, name, score, details_json = row
+            details = {}
+            if details_json:
+                try:
+                    details = json.loads(details_json)
+                except:
+                    pass
+                    
             results.append({
-                "match_id": row[0],
-                "candidate_id": row[1],
-                "name": row[2],
-                "score": row[3]
+                "match_id": match_id,
+                "candidate_id": candidate_id,
+                "name": name,
+                "score": score,
+                "details": details
             })
         return results
     

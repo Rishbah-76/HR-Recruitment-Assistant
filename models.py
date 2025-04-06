@@ -69,6 +69,54 @@ class OllamaModels:
         """
     
     @staticmethod
+    def format_semantic_match_prompt(job_description: str, cv_text: str) -> str:
+        """Format prompt for semantic matching between job and CV"""
+        return f"""
+        You are an expert HR recruiter assessing the semantic match between a job description and a CV.
+        Consider the overall fit, including tone, experience level, and industry alignment.
+        
+        Job Description:
+        {job_description}
+        
+        Candidate CV:
+        {cv_text}
+        
+        On a scale of 0-100%, how well does this candidate semantically match this position?
+        Consider factors beyond just keywords, such as:
+        - Experience level match
+        - Industry background alignment
+        - Seniority level compatibility
+        - Overall tone and approach
+        
+        Provide your response as JSON with the following structure:
+        {{
+            "match_score": (float between 0 and 1),
+            "explanation": "Brief explanation of your assessment"
+        }}
+        """
+    
+    @staticmethod
+    def format_name_extraction_prompt(resume_text: str) -> str:
+        """Format prompt to extract candidate name from resume"""
+        # Limit text to first 2000 characters for efficiency
+        truncated_text = resume_text[:2000]
+        
+        return f"""
+        You are an expert HR assistant. Extract the full name of the candidate from the following resume text.
+        Common resume formats typically have the candidate's name at the top or in a header section.
+        
+        Resume text (first section):
+        {truncated_text}
+        
+        Return your response in JSON format with the following structure:
+        {{
+            "full_name": "Extracted full name of the candidate"
+        }}
+        
+        If you cannot determine the full name with confidence, provide your best guess.
+        """
+    
+    @staticmethod
     def format_email_prompt(candidate_name: str, job_title: str, company_name: str = "Our Company") -> str:
         """Format prompt for interview email generation"""
         return f"""

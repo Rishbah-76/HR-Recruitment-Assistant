@@ -1,7 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama.llms import OllamaLLM
 from langchain_ollama.embeddings import OllamaEmbeddings
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class OllamaModels:
     """Class to manage Ollama models for text generation and embeddings"""
@@ -117,10 +117,20 @@ class OllamaModels:
         """
     
     @staticmethod
-    def format_email_prompt(candidate_name: str, job_title: str, company_name: str = "Our Company") -> str:
+    def format_email_prompt(candidate_name: str, job_title: str, company_name: str = "Our Company", has_assessment: bool = False) -> str:
         """Format prompt for interview email generation"""
+        assessment_text = ""
+        if has_assessment:
+            assessment_text = """
+            Also mention that you've attached a skills assessment test that should be completed 
+            before the interview. Tell them it's designed to showcase their relevant skills and 
+            help guide the interview discussion. Ask them to return the completed assessment 
+            at least 24 hours before the interview.
+            """
+            
         return f"""
-        Draft a professional email to invite {candidate_name} for an interview for the {job_title} position at {company_name}.
+        Write a professional email to invite {candidate_name} for an interview for the {job_title} position at {company_name}. 
+        Start directly with "Subject:" without any introduction or preamble like "Here's a draft email:".
         
         Include:
         1. A brief introduction about the company
@@ -128,8 +138,9 @@ class OllamaModels:
         3. Propose available interview slots (next Monday and Tuesday at 10 AM or 2 PM)
         4. Request confirmation of their preferred slot
         5. Mention that the interview will be conducted via video call
+        {assessment_text}
         
-        Keep the tone professional but friendly. Format as plain text email only.
+        Format as plain text email only. Start directly with the subject line.
         """
     
     @staticmethod
@@ -160,4 +171,68 @@ class OllamaModels:
         - Any other relevant sections
         
         Format the CV as plain text with clear section headings.
+        """
+        
+    @staticmethod
+    def format_assessment_test_prompt(job_title: str, job_description: str, cv_text: str, match_details: Dict) -> str:
+        """Format prompt for assessment test generation"""
+        # Extract skills data from match details if available
+        matching_skills = match_details.get("matching_skills", [])
+        missing_skills = match_details.get("missing_skills", [])
+        matching_preferred = match_details.get("matching_preferred_skills", [])
+        
+        skills_info = f"""
+        Skills the candidate has shown in their CV:
+        {', '.join(matching_skills)}
+        
+        Skills required for the job that may need assessment:
+        {', '.join(missing_skills)}
+        
+        Additional preferred skills the candidate may have:
+        {', '.join(matching_preferred)}
+        """
+        
+        return f"""
+        You are an expert HR assessment designer. Create a customized technical assessment test for a candidate 
+        applying to the {job_title} position. Design the test to specifically evaluate skills relevant to this role.
+        
+        Job Description:
+        {job_description}
+        
+        Candidate's CV Summary:
+        {cv_text[:500]}
+        
+        {skills_info}
+        
+        Create a comprehensive assessment with 2-3 sections covering the most relevant skills for this position.
+        Include a mix of multiple-choice and open-ended questions that will challenge the candidate appropriately.
+        
+        Focus your questions on:
+        1. Technical skills specifically required for this role
+        2. Areas where the candidate's CV may have gaps compared to requirements
+        3. Real-world scenarios the candidate might face in this position
+        
+        Return your assessment in JSON format with this structure:
+        {{
+            "introduction": "Brief introduction to the assessment",
+            "instructions": "Clear instructions for the candidate",
+            "sections": [
+                {{
+                    "title": "Section title (e.g., Technical Skills, Problem Solving)",
+                    "questions": [
+                        {{
+                            "type": "multiple_choice",
+                            "question": "The question text",
+                            "options": ["Option 1", "Option 2", "Option 3", "Option 4"]
+                        }},
+                        {{
+                            "type": "open",
+                            "question": "An open-ended question"
+                        }}
+                    ]
+                }}
+            ]
+        }}
+        
+        Make the assessment challenging but fair, with questions directly relevant to the job requirements.
         """ 

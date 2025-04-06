@@ -6,3 +6,6 @@ streamlit
 python-dotenv
 pydantic
 pypdf
+reportlab
+pandas
+numpy

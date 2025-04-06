@@ -9,6 +9,11 @@ import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+import time
 
 class JobDescriptionAgent:
     """Agent for processing and summarizing job descriptions"""
@@ -203,7 +208,7 @@ class CVProcessingAgent:
         prompt = OllamaModels.format_candidate_match_prompt(job_summary, cv_text)
         match_response = self.llm.invoke(prompt)
         match_data = self._extract_json(match_response)
-        direct_score = float(match_data.get("score", 0)) / 100.0  # Convert percentage to float
+        direct_score = float(match_data.get("score", 0)) / 100.0  # Convert percentage to float (0-1 scale)
         scores.append(direct_score)
         
         # Technique 2: Skills matching score
@@ -214,7 +219,11 @@ class CVProcessingAgent:
         semantic_prompt = OllamaModels.format_semantic_match_prompt(job_description, cv_text)
         semantic_response = self.llm.invoke(semantic_prompt)
         semantic_data = self._extract_json(semantic_response)
+        
+        # Normalize semantic score to 0-1 scale
         semantic_match = float(semantic_data.get("match_score", 0.5))
+        if semantic_match > 1.0:  # If score is on 0-100 scale
+            semantic_match = semantic_match / 100.0
         scores.append(semantic_match)
         
         # Calculate the average score
@@ -340,6 +349,10 @@ class CVProcessingAgent:
                 semantic_response = self.llm.invoke(semantic_prompt)
                 semantic_data = self._extract_json(semantic_response)
                 semantic_score = float(semantic_data.get("match_score", 0.5))
+                
+                # Normalize semantic score to 0-1 scale
+                if semantic_score > 1.0:  # If score is on 0-100 scale
+                    semantic_score = semantic_score / 100.0
                 
                 # Calculate average
                 scores = [direct_score, skills_score, semantic_score]
@@ -481,19 +494,187 @@ class ShortlistingAgent:
         ]
 
 
+class TestGenerationAgent:
+    """Agent for generating customized assessment tests based on job and candidate profiles"""
+    
+    def __init__(self):
+        self.llm = OllamaModels.get_llm(temperature=0.7)
+    
+    def generate_assessment_test(self, job_title: str, job_description: str, 
+                               candidate_name: str, cv_text: str, match_details: Dict) -> str:
+        """
+        Generate a customized assessment test based on job and candidate profiles.
+        Returns the path to the generated PDF.
+        """
+        # Create a temporary file for the PDF
+        pdf_path = f"assessment_{candidate_name.replace(' ', '_')}_{int(time.time())}.pdf"
+        
+        try:
+            # Generate test content using LLM
+            test_content = self._generate_test_content(job_title, job_description, cv_text, match_details)
+            
+            # Create PDF with the test content
+            self._create_test_pdf(pdf_path, job_title, candidate_name, test_content)
+            
+            # Verify the PDF was created successfully
+            if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
+                raise ValueError("Failed to create PDF file or file is empty")
+            
+            return pdf_path
+        
+        except Exception as e:
+            print(f"Error in assessment test generation: {str(e)}")
+            # Clean up any partial file that might have been created
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except:
+                    pass
+            # Re-raise the exception
+            raise
+    
+    def _generate_test_content(self, job_title: str, job_description: str, 
+                              cv_text: str, match_details: Dict) -> Dict:
+        """Generate the content for the assessment test"""
+        prompt = OllamaModels.format_assessment_test_prompt(
+            job_title, job_description, cv_text, match_details
+        )
+        response = self.llm.invoke(prompt)
+        
+        try:
+            # Try to extract JSON content
+            test_content = self._extract_json(response)
+            return test_content
+        except:
+            # Fallback to basic structure if JSON parsing fails
+            return {
+                "introduction": f"Assessment Test for {job_title} position",
+                "instructions": "Please complete all questions to the best of your ability.",
+                "sections": [
+                    {
+                        "title": "Technical Assessment",
+                        "questions": [
+                            {"type": "open", "question": "Please explain your relevant experience for this role."}
+                        ]
+                    }
+                ]
+            }
+    
+    def _extract_json(self, text: str) -> Dict:
+        """Extract JSON from text response"""
+        try:
+            # Find JSON content with regex
+            json_match = re.search(r'({.*})', text.replace('\n', ' '), re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(1))
+            
+            # If no JSON is found with regex, try to parse the entire text
+            return json.loads(text)
+        except json.JSONDecodeError:
+            raise ValueError("Could not parse JSON response")
+    
+    def _create_test_pdf(self, pdf_path: str, job_title: str, candidate_name: str, 
+                         test_content: Dict) -> None:
+        """Create a PDF with the assessment test content"""
+        doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+        styles = getSampleStyleSheet()
+        
+        # Create custom styles
+        title_style = ParagraphStyle(
+            'TitleStyle', 
+            parent=styles['Heading1'],
+            fontSize=16,
+            alignment=1,  # Center alignment
+            spaceAfter=20
+        )
+        
+        heading_style = ParagraphStyle(
+            'HeadingStyle',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=10,
+            spaceBefore=15
+        )
+        
+        subheading_style = ParagraphStyle(
+            'SubheadingStyle',
+            parent=styles['Heading3'],
+            fontSize=12,
+            spaceAfter=8,
+            spaceBefore=10
+        )
+        
+        normal_style = styles['Normal']
+        normal_style.fontSize = 11
+        normal_style.spaceAfter = 8
+        
+        # Build the document
+        elements = []
+        
+        # Title
+        elements.append(Paragraph(f"Assessment Test: {job_title}", title_style))
+        elements.append(Paragraph(f"Candidate: {candidate_name}", heading_style))
+        elements.append(Spacer(1, 20))
+        
+        # Introduction
+        if "introduction" in test_content and test_content["introduction"]:
+            elements.append(Paragraph("Introduction", heading_style))
+            elements.append(Paragraph(str(test_content["introduction"]), normal_style))
+            elements.append(Spacer(1, 10))
+        
+        # Instructions
+        if "instructions" in test_content and test_content["instructions"]:
+            elements.append(Paragraph("Instructions", heading_style))
+            elements.append(Paragraph(str(test_content["instructions"]), normal_style))
+            elements.append(Spacer(1, 15))
+        
+        # Sections with questions
+        if "sections" in test_content and isinstance(test_content["sections"], list):
+            for section in test_content["sections"]:
+                if not isinstance(section, dict) or "title" not in section:
+                    continue
+                    
+                elements.append(Paragraph(str(section["title"]), heading_style))
+                
+                if "questions" in section and isinstance(section["questions"], list):
+                    for i, question in enumerate(section["questions"], 1):
+                        if not isinstance(question, dict) or "question" not in question:
+                            continue
+                            
+                        elements.append(Paragraph(f"Q{i}. {str(question['question'])}", subheading_style))
+                        
+                        # Add answer space depending on question type
+                        if question.get("type") == "multiple_choice" and "options" in question and isinstance(question["options"], list):
+                            for j, option in enumerate(question["options"], 1):
+                                elements.append(Paragraph(f"    {chr(96+j)}) {str(option)}", normal_style))
+                        else:
+                            # For open questions, add some blank space
+                            elements.append(Spacer(1, 40))
+                
+                elements.append(Spacer(1, 15))
+        
+        # Build the PDF
+        doc.build(elements)
+
+
 class InterviewSchedulerAgent:
     """Agent for scheduling interviews"""
     
     def __init__(self, db: Database):
         self.db = db
         self.llm = OllamaModels.get_llm(temperature=0.7)  # Higher temperature for creative emails
+        self.test_agent = TestGenerationAgent()
     
-    def generate_interview_email(self, match_id: int, company_name: str = "Our Company") -> str:
-        """Generate interview email for a candidate"""
+    def generate_interview_email(self, match_id: int, company_name: str = "Our Company") -> Tuple[str, Optional[str]]:
+        """
+        Generate interview email for a candidate with an assessment test attached.
+        Returns a tuple of (email_content, assessment_test_path).
+        """
         # Get match details
         cursor = self.db.conn.cursor()
         cursor.execute(
-            "SELECT c.name, j.title FROM matches m "
+            "SELECT c.name, j.title, j.description, c.cv_text, m.details "
+            "FROM matches m "
             "JOIN candidates c ON m.candidate_id = c.id "
             "JOIN jobs j ON m.job_id = j.id "
             "WHERE m.id = ?",
@@ -502,15 +683,53 @@ class InterviewSchedulerAgent:
         
         row = cursor.fetchone()
         if not row:
-            return ""
+            return "", None
         
-        candidate_name, job_title = row
+        candidate_name, job_title, job_description, cv_text, details_json = row
         
-        # Generate email using LLM
-        prompt = OllamaModels.format_email_prompt(candidate_name, job_title, company_name)
+        # Parse match details
+        match_details = {}
+        if details_json:
+            try:
+                match_details = json.loads(details_json)
+            except:
+                pass
+        
+        # Generate an assessment test
+        assessment_path = None
+        has_assessment = False
+        try:
+            assessment_path = self.test_agent.generate_assessment_test(
+                job_title, job_description, candidate_name, cv_text, match_details
+            )
+            has_assessment = True if assessment_path else False
+        except Exception as e:
+            print(f"Error generating assessment test: {str(e)}")
+            has_assessment = False
+        
+        # Generate email with mention of assessment if one was created
+        prompt = OllamaModels.format_email_prompt(
+            candidate_name, job_title, company_name, has_assessment
+        )
         email = self.llm.invoke(prompt)
+        
+        # Clean up the email text
+        # Remove any introductory text like "Here's a draft email:"
+        email_cleaned = email
+        intro_patterns = [
+            r'^Here\'s a draft email:[\s\n]*',
+            r'^Here is a draft email:[\s\n]*',
+            r'^Draft email:[\s\n]*',
+            r'^I have drafted an email:[\s\n]*',
+            r'^Here\'s an email:[\s\n]*',
+            r'^Email:[\s\n]*',
+            r'^Please find below a professional email:[\s\n]*'
+        ]
+        
+        for pattern in intro_patterns:
+            email_cleaned = re.sub(pattern, '', email_cleaned, flags=re.IGNORECASE)
         
         # Update email sent status
         self.db.update_email_sent(match_id, True)
         
-        return email 
+        return email_cleaned, assessment_path 

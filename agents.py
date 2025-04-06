@@ -8,6 +8,7 @@ import re
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 
 class JobDescriptionAgent:
     """Agent for processing and summarizing job descriptions"""
@@ -284,43 +285,103 @@ class CVProcessingAgent:
         results = []
         total_candidates = len(candidate_ids)
         
-        # Match candidates in parallel using ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=min(5, total_candidates)) as executor:
-            future_to_candidate = {
-                executor.submit(self.match_with_job, job_id, candidate_id): candidate_id 
-                for candidate_id in candidate_ids
-            }
+        # Get job info once from the database to avoid multiple queries
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT title, description, summary FROM jobs WHERE id = ?", (job_id,))
+        job_row = cursor.fetchone()
+        
+        if not job_row:
+            return []
             
-            completed = 0
-            for future in future_to_candidate:
-                candidate_id = future_to_candidate[future]
-                try:
-                    score = future.result()
-                    
-                    # Get candidate name
-                    cursor = self.db.conn.cursor()
-                    cursor.execute("SELECT name FROM candidates WHERE id = ?", (candidate_id,))
-                    candidate_row = cursor.fetchone()
-                    name = candidate_row[0] if candidate_row else f"Candidate {candidate_id}"
-                    
-                    results.append({
-                        "candidate_id": candidate_id,
-                        "name": name,
-                        "score": score,
-                        "status": "success"
-                    })
-                    
-                except Exception as e:
+        job_title, job_description, job_summary_str = job_row
+        
+        # Get all candidate info to avoid repeated queries
+        candidates = {}
+        cursor.execute("SELECT id, name, cv_text FROM candidates WHERE id IN ({})".format(
+            ','.join('?' for _ in candidate_ids)), candidate_ids)
+        for row in cursor.fetchall():
+            candidates[row[0]] = {"id": row[0], "name": row[1], "cv_text": row[2]}
+        
+        # Process candidates one by one (no threading)
+        completed = 0
+        for candidate_id in candidate_ids:
+            try:
+                # Check if we have the candidate info
+                if candidate_id not in candidates:
                     results.append({
                         "candidate_id": candidate_id,
                         "name": f"Candidate {candidate_id}",
                         "score": 0.0,
-                        "status": f"error: {str(e)}"
+                        "status": "error: Candidate not found"
                     })
+                    completed += 1
+                    if status_callback:
+                        status_callback(completed, total_candidates)
+                    continue
                 
-                completed += 1
-                if status_callback:
-                    status_callback(completed, total_candidates)
+                # Get candidate details
+                candidate = candidates[candidate_id]
+                
+                # Calculate scores directly (no DB access in this part)
+                # 1. LLM direct evaluation
+                prompt = OllamaModels.format_candidate_match_prompt(json.loads(job_summary_str), candidate["cv_text"])
+                match_response = self.llm.invoke(prompt)
+                match_data = self._extract_json(match_response)
+                direct_score = float(match_data.get("score", 0)) / 100.0
+                
+                # 2. Skills matching score
+                skills_score = self.calculate_skills_match(
+                    json.loads(job_summary_str).get("required_skills", []), 
+                    candidate["cv_text"]
+                )
+                
+                # 3. Semantic matching
+                semantic_prompt = OllamaModels.format_semantic_match_prompt(job_description, candidate["cv_text"])
+                semantic_response = self.llm.invoke(semantic_prompt)
+                semantic_data = self._extract_json(semantic_response)
+                semantic_score = float(semantic_data.get("match_score", 0.5))
+                
+                # Calculate average
+                scores = [direct_score, skills_score, semantic_score]
+                avg_score = sum(scores) / len(scores) if scores else 0.0
+                
+                # Prepare details
+                score_details = {
+                    "direct_score": direct_score,
+                    "skills_score": skills_score,
+                    "semantic_score": semantic_score,
+                    "average_score": avg_score,
+                    "matching_skills": match_data.get("matching_skills", []),
+                    "missing_skills": match_data.get("missing_skills", []),
+                    "matching_preferred_skills": match_data.get("matching_preferred_skills", []),
+                    "assessment": match_data.get("assessment", "")
+                }
+                
+                # Store match in database
+                match_id = self.db.add_match(job_id, candidate_id, avg_score, json.dumps(score_details))
+                
+                # Add to results
+                results.append({
+                    "candidate_id": candidate_id,
+                    "name": candidate["name"],
+                    "score": avg_score,
+                    "status": "success"
+                })
+                
+            except Exception as e:
+                # Get name if possible
+                name = candidates.get(candidate_id, {}).get("name", f"Candidate {candidate_id}")
+                results.append({
+                    "candidate_id": candidate_id,
+                    "name": name,
+                    "score": 0.0,
+                    "status": f"error: {str(e)}"
+                })
+                
+            # Update progress
+            completed += 1
+            if status_callback:
+                status_callback(completed, total_candidates)
         
         return results
 

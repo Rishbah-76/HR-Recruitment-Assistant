@@ -147,4 +147,7 @@ This application uses local LLMs through Ollama to automate the recruitment proc
 - **Customization**: Easily adjust matching criteria and thresholds
 - **Privacy**: All processing happens locally 
 - **Bulk Processing**: Handle large volumes of CVs efficiently
-- **Data-Driven Decisions**: Analytics dashboard for recruitment insights 
+- **Data-Driven Decisions**: Analytics dashboard for recruitment insights
+
+[View Demo from Google Drive](https://drive.google.com/file/d/1P8GX_gu8THCZGm4m_d8P7EXUu3VwYqvT/view?usp=sharing)
+

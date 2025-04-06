@@ -8,9 +8,13 @@ This application uses local LLMs through Ollama to automate the recruitment proc
 
 1. **Job Description Processing**: Extract structured information from job descriptions
 2. **CV Analysis**: Process candidate CVs and extract relevant information
-3. **Matching**: Match candidates with job requirements using semantic similarity
-4. **Shortlisting**: Shortlist candidates based on match scores and priority skills
-5. **Interview Scheduling**: Generate personalized interview invitation emails
+3. **Bulk CV Processing**: Process multiple resumes simultaneously with parallel processing
+4. **CV/Resume Enhancement**: Generate improved CVs tailored to specific job requirements
+5. **Candidate Matching**: Match candidates with job requirements using semantic similarity
+6. **Shortlisting**: Shortlist candidates based on match scores and priority skills
+7. **Interview Scheduling**: Generate personalized interview invitation emails
+8. **Assessment Test Generation**: Create customized skills assessments for candidates
+9. **Analytics Dashboard**: View recruitment metrics and candidate pipeline statistics
 
 ## Technical Stack
 
@@ -52,30 +56,56 @@ This application uses local LLMs through Ollama to automate the recruitment proc
    python load_samples.py
    ```
 
-## Usage Guide
+## Features in Detail
 
 ### 1. Process Job Descriptions
 
 - Enter job title and description text
 - The application will use Ollama to extract structured information (skills, qualifications, etc.)
 - View the generated JSON summary
+- Support for bulk job imports from CSV
 
 ### 2. Process Candidate CVs
 
 - Enter candidate name and CV text
-- The application will process and store the information
+- Upload PDF resumes with automatic name extraction
+- Bulk upload and process multiple candidate CVs simultaneously
+- Vector embeddings for semantic matching
 
-### 3. Match & Shortlist
+### 3. CV/Resume Enhancement
+
+- Generate improved versions of candidate CVs tailored to specific job requirements
+- Highlight relevant skills and experience
+- Format professional summaries optimized for the target position
+
+### 4. Match & Shortlist
 
 - Select a job from the dropdown
 - Select candidates to match with the job
 - View match scores and shortlist candidates based on a threshold
 - Adjust rankings using priority skills
+- Semantic matching beyond keyword matching
 
-### 4. Schedule Interviews
+### 5. Schedule Interviews
 
 - Select shortlisted candidates
 - Generate personalized interview invitation emails
+- Include assessment test attachments
+- Track email status for each candidate
+
+### 6. Assessment Test Generation
+
+- Create customized skills assessments based on job requirements
+- Generate technical questions related to required skills
+- Mix of multiple-choice and open-ended questions
+- PDF generation for assessment documents
+
+### 7. Analytics Dashboard
+
+- View recruitment pipeline metrics
+- Analyze match score distributions
+- Track shortlisting rates by job type
+- Monitor candidate processing status
 
 ## Project Structure
 
@@ -104,9 +134,17 @@ This application uses local LLMs through Ollama to automate the recruitment proc
 4. **Interview Scheduler Agent**:
    - Generates personalized interview invitation emails
 
+5. **CV Generation Agent**:
+   - Creates tailored CVs optimized for specific job positions
+
+6. **Assessment Generation Agent**:
+   - Creates custom skills assessments for candidates
+
 ## Benefits
 
 - **Semantic Understanding**: Uses LLMs for deeper understanding of job requirements and candidate qualifications
 - **Automation**: Reduces manual screening time
 - **Customization**: Easily adjust matching criteria and thresholds
 - **Privacy**: All processing happens locally 
+- **Bulk Processing**: Handle large volumes of CVs efficiently
+- **Data-Driven Decisions**: Analytics dashboard for recruitment insights 

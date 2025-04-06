@@ -133,28 +133,138 @@ def update_progress_callback(current, total, name=None, status=None):
 if page == "Process Job Description":
     st.header("Process Job Description")
     
-    # Form to submit job description
-    with st.form("job_form"):
-        job_title = st.text_input("Job Title")
-        job_description = st.text_area("Job Description", height=300)
-        submitted = st.form_submit_button("Process Job")
+    # Create tabs for single job entry and bulk upload
+    job_tab1, job_tab2 = st.tabs(["Single Job Entry", "Bulk Import from CSV"])
     
-    if submitted and job_title and job_description:
-        with st.spinner("Processing job description..."):
-            job_id = job_agent.process_job_description(job_title, job_description)
-            
-            # Get the summary from the database
-            cursor = db.conn.cursor()
-            cursor.execute("SELECT summary FROM jobs WHERE id = ?", (job_id,))
-            summary_json = cursor.fetchone()[0]
-            summary = json.loads(summary_json)
-            
-            st.success(f"Job processed successfully! Job ID: {job_id}")
-            refresh_jobs()
-            
-            # Display the summary
-            st.subheader("Generated Job Summary")
-            st.json(summary)
+    with job_tab1:
+        # Form to submit job description
+        with st.form("job_form"):
+            job_title = st.text_input("Job Title")
+            job_description = st.text_area("Job Description", height=300)
+            submitted = st.form_submit_button("Process Job")
+        
+        if submitted and job_title and job_description:
+            with st.spinner("Processing job description..."):
+                job_id = job_agent.process_job_description(job_title, job_description)
+                
+                # Get the summary from the database
+                cursor = db.conn.cursor()
+                cursor.execute("SELECT summary FROM jobs WHERE id = ?", (job_id,))
+                summary_json = cursor.fetchone()[0]
+                summary = json.loads(summary_json)
+                
+                st.success(f"Job processed successfully! Job ID: {job_id}")
+                refresh_jobs()
+                
+                # Display the summary
+                st.subheader("Generated Job Summary")
+                st.json(summary)
+    
+    with job_tab2:
+        st.subheader("Import Multiple Job Descriptions from CSV")
+        
+        # Instructions for CSV format
+        st.markdown("""
+        ### CSV Format Requirements
+        Your CSV file should have the following columns:
+        - `title`: Job title
+        - `description`: Full job description
+        
+        Additional columns will be ignored.
+        """)
+        
+        # File uploader for CSV
+        uploaded_file = st.file_uploader("Upload CSV with job descriptions", type=["csv"])
+        
+        if uploaded_file is not None:
+            try:
+                # Read CSV
+                import pandas as pd
+                try:
+                    # First try UTF-8
+                    job_df = pd.read_csv(uploaded_file)
+                except UnicodeDecodeError:
+                    # If that fails, try other common encodings
+                    try:
+                        # Reset file pointer to beginning
+                        uploaded_file.seek(0)
+                        job_df = pd.read_csv(uploaded_file, encoding='latin-1')
+                    except:
+                        # If that fails too, try Windows encoding
+                        uploaded_file.seek(0)
+                        job_df = pd.read_csv(uploaded_file, encoding='cp1252')
+                
+                # Check for column name variations and standardize
+                column_mapping = {
+                    'Job Title': 'title',
+                    'Job Description': 'description',
+                    'title': 'title',
+                    'description': 'description'
+                }
+                
+                # Rename columns if they match expected variations
+                for orig_col, standard_col in column_mapping.items():
+                    if orig_col in job_df.columns:
+                        job_df = job_df.rename(columns={orig_col: standard_col})
+                
+                # Validate CSV format
+                required_columns = ["title", "description"]
+                missing_columns = [col for col in required_columns if col not in job_df.columns]
+                
+                if missing_columns:
+                    st.error(f"Missing required columns: {', '.join(missing_columns)}. Please check your CSV format.")
+                else:
+                    # Display preview
+                    st.write("Preview of job descriptions to be imported:")
+                    st.dataframe(job_df[["title", "description"]].head())
+                    
+                    # Process button
+                    if st.button("Process All Jobs"):
+                        # Setup progress tracking
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        # Process each job
+                        job_results = []
+                        for i, (_, row) in enumerate(job_df.iterrows()):
+                            # Update progress
+                            progress = (i + 1) / len(job_df)
+                            progress_bar.progress(progress)
+                            status_text.text(f"Processing job {i+1}/{len(job_df)}: {row['title']}")
+                            
+                            try:
+                                # Process job description
+                                job_id = job_agent.process_job_description(row['title'], row['description'])
+                                job_results.append({
+                                    "id": job_id,
+                                    "title": row['title'],
+                                    "status": "success"
+                                })
+                            except Exception as e:
+                                job_results.append({
+                                    "id": None,
+                                    "title": row['title'],
+                                    "status": f"error: {str(e)}"
+                                })
+                        
+                        # Complete progress
+                        progress_bar.progress(100)
+                        status_text.text(f"Processed {len(job_df)} job descriptions!")
+                        
+                        # Refresh jobs list
+                        refresh_jobs()
+                        
+                        # Display results
+                        st.subheader("Import Results")
+                        results_df = pd.DataFrame(job_results)
+                        st.dataframe(results_df)
+                        
+                        # Count successes and failures
+                        success_count = sum(1 for r in job_results if r["status"] == "success")
+                        st.success(f"Successfully imported {success_count} out of {len(job_df)} job descriptions.")
+                    
+            except Exception as e:
+                st.error(f"Error processing CSV file: {str(e)}")
     
     # Display existing jobs
     st.subheader("Existing Jobs")
@@ -1219,6 +1329,141 @@ elif page == "Analytics Dashboard":
             
         with efficiency_col3:
             st.metric(label="Interview Rate", value=f"{interview_rate*100:.1f}%")
+    
+    # Admin section with password protection
+    st.markdown("---")
+    with st.expander("⚙️ Admin Controls", expanded=False):
+        st.markdown("""
+        <div style='background-color: #f8f9fa; padding: 15px; border-radius: 5px; border-left: 5px solid #007bff;'>
+        <h3 style='color: #007bff;'>Database Administration</h3>
+        <p>These operations require administrator access. Please enter the admin password to proceed.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Admin password - in a real app, this would be stored securely
+        ADMIN_PASSWORD = "hr_admin_2023"  # This is just for demonstration
+        
+        # Password input
+        admin_password = st.text_input("Admin Password", type="password")
+        
+        if admin_password:
+            if admin_password == ADMIN_PASSWORD:
+                st.success("Access granted")
+                
+                # Admin controls
+                st.markdown("### Database Operations")
+                
+                admin_col1, admin_col2 = st.columns(2)
+                
+                with admin_col1:
+                    st.markdown("""
+                    <div style='background-color: #fff3cd; padding: 10px; border-radius: 5px; border-left: 5px solid #ffc107;'>
+                    <h4 style='color: #856404;'>Reset Database</h4>
+                    <p>Clear all matches and evaluations but keep jobs and candidates.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    reset_confirmed = st.checkbox("I understand this will delete all match data")
+                    
+                    if st.button("Reset Match Data", disabled=not reset_confirmed):
+                        try:
+                            # Reset database matches but keep jobs and candidates
+                            cursor = db.conn.cursor()
+                            cursor.execute("DELETE FROM matches")
+                            db.conn.commit()
+                            
+                            # Clear session state matches
+                            st.session_state.matches = {}
+                            
+                            st.success("✅ Successfully reset all match data")
+                        except Exception as e:
+                            st.error(f"Error resetting database: {str(e)}")
+                
+                with admin_col2:
+                    st.markdown("""
+                    <div style='background-color: #f8d7da; padding: 10px; border-radius: 5px; border-left: 5px solid #dc3545;'>
+                    <h4 style='color: #721c24;'>Full Database Reset</h4>
+                    <p>This will completely reset the database, removing ALL data!</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    delete_confirmed = st.checkbox("I understand this will delete ALL data permanently")
+                    delete_double_confirmed = st.checkbox("I confirm this is not a production database")
+                    
+                    if st.button("Complete Database Reset", 
+                                disabled=not (delete_confirmed and delete_double_confirmed),
+                                type="primary"):
+                        try:
+                            # Full database reset
+                            cursor = db.conn.cursor()
+                            cursor.execute("DELETE FROM matches")
+                            cursor.execute("DELETE FROM candidates")
+                            cursor.execute("DELETE FROM jobs")
+                            db.conn.commit()
+                            
+                            # Clear session state
+                            st.session_state.matches = {}
+                            st.session_state.jobs = []
+                            st.session_state.candidates = []
+                            
+                            st.success("✅ Successfully reset the entire database")
+                            st.info("You'll need to refresh the page to see the changes in all dashboard sections")
+                        except Exception as e:
+                            st.error(f"Error resetting database: {str(e)}")
+                
+                # Database statistics
+                st.markdown("### Database Statistics")
+                stats_col1, stats_col2, stats_col3 = st.columns(3)
+                
+                with stats_col1:
+                    st.metric("Database Size", f"{os.path.getsize(db.db_path)/1024:.1f} KB")
+                    
+                with stats_col2:
+                    cursor = db.conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+                    st.metric("Tables", cursor.fetchone()[0])
+                    
+                with stats_col3:
+                    # Get total rows across all main tables
+                    cursor = db.conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM jobs")
+                    jobs_count = cursor.fetchone()[0]
+                    cursor.execute("SELECT COUNT(*) FROM candidates")
+                    candidates_count = cursor.fetchone()[0]
+                    cursor.execute("SELECT COUNT(*) FROM matches")
+                    matches_count = cursor.fetchone()[0]
+                    
+                    st.metric("Total Records", jobs_count + candidates_count + matches_count)
+                
+                # Export/Backup option
+                st.markdown("### Backup & Export")
+                if st.button("Create Database Backup"):
+                    import shutil
+                    import datetime
+                    
+                    # Create backup with timestamp
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    backup_path = f"hrapp_backup_{timestamp}.db"
+                    
+                    # Copy the database file
+                    shutil.copy2(db.db_path, backup_path)
+                    
+                    # Provide download link
+                    with open(backup_path, "rb") as f:
+                        st.download_button(
+                            label="Download Backup File",
+                            data=f.read(),
+                            file_name=backup_path,
+                            mime="application/octet-stream"
+                        )
+            else:
+                st.error("Incorrect password. Access denied.")
+                
+        st.markdown("""
+        <div style='font-size: 0.8em; color: #6c757d; margin-top: 15px;'>
+        For security reasons, all administrative actions are logged.
+        </div>
+        """, unsafe_allow_html=True)
 
 # App footer
 st.markdown("---")

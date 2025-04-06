@@ -14,6 +14,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 import time
+import concurrent.futures
 
 class JobDescriptionAgent:
     """Agent for processing and summarizing job descriptions"""
@@ -21,6 +22,8 @@ class JobDescriptionAgent:
     def __init__(self, db: Database):
         self.db = db
         self.llm = OllamaModels.get_llm()
+        # Cache for embedding model to avoid recreating it
+        self._embedding_model = None
     
     def process_job_description(self, title: str, description: str) -> int:
         """Process a job description, generate summary and store in database"""
@@ -126,41 +129,54 @@ class ResumeProcessingAgent:
             return "Unknown Candidate"
     
     async def bulk_process_resumes(self, file_paths: List[str], status_callback=None) -> List[Dict[str, Any]]:
-        """Process multiple resumes in bulk"""
+        """Process multiple resumes in bulk using parallel processing"""
         results = []
+        total_files = len(file_paths)
+        completed = 0
         
-        for i, file_path in enumerate(file_paths):
-            try:
-                # Process resume
-                candidate_id, resume_text = await self.process_resume("auto", file_path)
-                
-                # Get candidate name from database
-                cursor = self.db.conn.cursor()
-                cursor.execute("SELECT name FROM candidates WHERE id = ?", (candidate_id,))
-                name = cursor.fetchone()[0]
-                
-                results.append({
-                    "candidate_id": candidate_id,
-                    "name": name,
-                    "status": "success",
-                    "file_path": file_path
-                })
-                
-                # Update progress if callback provided
-                if status_callback:
-                    status_callback(i+1, len(file_paths), name, "success")
+        # Use semaphore to limit concurrent processing to prevent Ollama overload
+        semaphore = asyncio.Semaphore(5)  # Process up to 5 files concurrently
+        
+        async def process_single_resume(file_path):
+            async with semaphore:
+                try:
+                    # Process resume
+                    candidate_id, resume_text = await self.process_resume("auto", file_path)
                     
-            except Exception as e:
-                results.append({
-                    "candidate_id": None,
-                    "name": os.path.basename(file_path),
-                    "status": f"error: {str(e)}",
-                    "file_path": file_path
-                })
-                
-                # Update progress if callback provided
-                if status_callback:
-                    status_callback(i+1, len(file_paths), os.path.basename(file_path), f"error: {str(e)}")
+                    # Get candidate name from database
+                    cursor = self.db.conn.cursor()
+                    cursor.execute("SELECT name FROM candidates WHERE id = ?", (candidate_id,))
+                    name = cursor.fetchone()[0]
+                    
+                    return {
+                        "candidate_id": candidate_id,
+                        "name": name,
+                        "status": "success",
+                        "file_path": file_path
+                    }
+                    
+                except Exception as e:
+                    return {
+                        "candidate_id": None,
+                        "name": os.path.basename(file_path),
+                        "status": f"error: {str(e)}",
+                        "file_path": file_path
+                    }
+        
+        # Create tasks for all files
+        tasks = [process_single_resume(file_path) for file_path in file_paths]
+        
+        # Process files concurrently and process results as they complete
+        for i, task in enumerate(asyncio.as_completed(tasks)):
+            result = await task
+            results.append(result)
+            
+            # Update progress
+            completed += 1
+            if status_callback:
+                name = result.get("name", os.path.basename(result.get("file_path", "")))
+                status = result.get("status", "")
+                status_callback(completed, total_files, name, status)
         
         return results
 
@@ -303,6 +319,7 @@ class CVProcessingAgent:
             return []
             
         job_title, job_description, job_summary_str = job_row
+        job_summary = json.loads(job_summary_str)
         
         # Get all candidate info to avoid repeated queries
         candidates = {}
@@ -311,36 +328,34 @@ class CVProcessingAgent:
         for row in cursor.fetchall():
             candidates[row[0]] = {"id": row[0], "name": row[1], "cv_text": row[2]}
         
-        # Process candidates one by one (no threading)
-        completed = 0
-        for candidate_id in candidate_ids:
+        # Prepare batch database insertion for matches
+        match_data_to_insert = []
+        
+        # Function to process a single candidate
+        def process_candidate(candidate_id):
             try:
                 # Check if we have the candidate info
                 if candidate_id not in candidates:
-                    results.append({
+                    return {
                         "candidate_id": candidate_id,
                         "name": f"Candidate {candidate_id}",
                         "score": 0.0,
                         "status": "error: Candidate not found"
-                    })
-                    completed += 1
-                    if status_callback:
-                        status_callback(completed, total_candidates)
-                    continue
+                    }
                 
                 # Get candidate details
                 candidate = candidates[candidate_id]
                 
                 # Calculate scores directly (no DB access in this part)
                 # 1. LLM direct evaluation
-                prompt = OllamaModels.format_candidate_match_prompt(json.loads(job_summary_str), candidate["cv_text"])
+                prompt = OllamaModels.format_candidate_match_prompt(job_summary, candidate["cv_text"])
                 match_response = self.llm.invoke(prompt)
                 match_data = self._extract_json(match_response)
                 direct_score = float(match_data.get("score", 0)) / 100.0
                 
                 # 2. Skills matching score
                 skills_score = self.calculate_skills_match(
-                    json.loads(job_summary_str).get("required_skills", []), 
+                    job_summary.get("required_skills", []), 
                     candidate["cv_text"]
                 )
                 
@@ -370,32 +385,67 @@ class CVProcessingAgent:
                     "assessment": match_data.get("assessment", "")
                 }
                 
-                # Store match in database
-                match_id = self.db.add_match(job_id, candidate_id, avg_score, json.dumps(score_details))
+                # Save info for later batch insertion
+                match_data_to_insert.append((
+                    job_id, 
+                    candidate_id, 
+                    avg_score, 
+                    json.dumps(score_details)
+                ))
                 
-                # Add to results
-                results.append({
+                return {
                     "candidate_id": candidate_id,
                     "name": candidate["name"],
                     "score": avg_score,
-                    "status": "success"
-                })
+                    "status": "success",
+                    "details": score_details
+                }
                 
             except Exception as e:
                 # Get name if possible
                 name = candidates.get(candidate_id, {}).get("name", f"Candidate {candidate_id}")
-                results.append({
+                return {
                     "candidate_id": candidate_id,
                     "name": name,
                     "score": 0.0,
                     "status": f"error: {str(e)}"
-                })
-                
-            # Update progress
-            completed += 1
-            if status_callback:
-                status_callback(completed, total_candidates)
+                }
         
+        # Process candidates in parallel
+        with ThreadPoolExecutor(max_workers=min(10, total_candidates)) as executor:
+            # Submit all tasks
+            future_to_candidate = {
+                executor.submit(process_candidate, candidate_id): candidate_id 
+                for candidate_id in candidate_ids
+            }
+            
+            # Process results as they complete
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_candidate):
+                result = future.result()
+                results.append(result)
+                
+                # Update progress
+                completed += 1
+                if status_callback:
+                    status_callback(completed, total_candidates)
+        
+        # Batch insert all match data to database
+        if match_data_to_insert:
+            try:
+                cursor = self.db.conn.cursor()
+                cursor.execute("BEGIN TRANSACTION")
+                cursor.executemany(
+                    "INSERT INTO matches (job_id, candidate_id, score, details) VALUES (?, ?, ?, ?)",
+                    match_data_to_insert
+                )
+                self.db.conn.commit()
+            except Exception as e:
+                self.db.conn.rollback()
+                print(f"Error batch inserting matches: {str(e)}")
+        
+        # Sort results by score (highest first)
+        results.sort(key=lambda x: x.get("score", 0), reverse=True)
         return results
 
 
@@ -664,6 +714,8 @@ class InterviewSchedulerAgent:
         self.db = db
         self.llm = OllamaModels.get_llm(temperature=0.7)  # Higher temperature for creative emails
         self.test_agent = TestGenerationAgent()
+        # Create a reusable cursor
+        self.cursor = self.db.conn.cursor()
     
     def generate_interview_email(self, match_id: int, company_name: str = "Our Company") -> Tuple[str, Optional[str]]:
         """
@@ -671,8 +723,7 @@ class InterviewSchedulerAgent:
         Returns a tuple of (email_content, assessment_test_path).
         """
         # Get match details
-        cursor = self.db.conn.cursor()
-        cursor.execute(
+        self.cursor.execute(
             "SELECT c.name, j.title, j.description, c.cv_text, m.details "
             "FROM matches m "
             "JOIN candidates c ON m.candidate_id = c.id "
@@ -681,7 +732,7 @@ class InterviewSchedulerAgent:
             (match_id,)
         )
         
-        row = cursor.fetchone()
+        row = self.cursor.fetchone()
         if not row:
             return "", None
         
@@ -729,7 +780,46 @@ class InterviewSchedulerAgent:
         for pattern in intro_patterns:
             email_cleaned = re.sub(pattern, '', email_cleaned, flags=re.IGNORECASE)
         
-        # Update email sent status
+        # Update email sent status in batch mode later
         self.db.update_email_sent(match_id, True)
         
-        return email_cleaned, assessment_path 
+        return email_cleaned, assessment_path
+    
+    def generate_bulk_emails(self, match_ids: List[int], company_name: str = "Our Company") -> List[Dict[str, Any]]:
+        """Generate emails for multiple candidates in a more efficient way"""
+        results = []
+        
+        # Process in batches to prevent Ollama overload
+        batch_size = 3
+        for i in range(0, len(match_ids), batch_size):
+            batch = match_ids[i:i+batch_size]
+            
+            # Process each match in the batch
+            for match_id in batch:
+                try:
+                    email_content, assessment_path = self.generate_interview_email(match_id, company_name)
+                    results.append({
+                        "match_id": match_id,
+                        "email": email_content,
+                        "assessment_path": assessment_path,
+                        "status": "success"
+                    })
+                except Exception as e:
+                    results.append({
+                        "match_id": match_id,
+                        "email": None,
+                        "assessment_path": None,
+                        "status": f"error: {str(e)}"
+                    })
+        
+        # Batch update email_sent status
+        self.db.conn.execute("BEGIN TRANSACTION")
+        try:
+            for result in results:
+                if result["status"] == "success":
+                    self.db.update_email_sent(result["match_id"], True)
+            self.db.conn.commit()
+        except:
+            self.db.conn.rollback()
+            
+        return results 

@@ -9,3 +9,4 @@ pypdf
 reportlab
 pandas
 numpy
+sqlite-vss

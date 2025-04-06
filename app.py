@@ -120,6 +120,21 @@ async def bulk_process_resumes_async(file_paths):
 def bulk_process_resumes_sync(file_paths):
     return asyncio.run(bulk_process_resumes_async(file_paths))
 
+# Add optimized bulk operations
+def batch_execute_queries(conn, query, params_list):
+    """Execute multiple queries in a single transaction for better performance"""
+    cursor = conn.cursor()
+    try:
+        conn.execute("BEGIN TRANSACTION")
+        for params in params_list:
+            cursor.execute(query, params)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+
 def update_progress_callback(current, total, name=None, status=None):
     """Update progress in session state"""
     st.session_state.progress = {
@@ -226,30 +241,57 @@ if page == "Process Job Description":
                         
                         # Process each job
                         job_results = []
-                        for i, (_, row) in enumerate(job_df.iterrows()):
-                            # Update progress
-                            progress = (i + 1) / len(job_df)
-                            progress_bar.progress(progress)
-                            status_text.text(f"Processing job {i+1}/{len(job_df)}: {row['title']}")
+                        
+                        # Preprocess jobs to avoid repetitive work
+                        jobs_to_process = []
+                        for _, row in job_df.iterrows():
+                            jobs_to_process.append({
+                                "title": row['title'],
+                                "description": row['description']
+                            })
+                        
+                        total_jobs = len(jobs_to_process)
+                        status_text.text(f"Preparing to process {total_jobs} jobs...")
+                        
+                        # Process jobs in batches for better performance
+                        batch_size = 5  # Process 5 jobs at a time to balance speed and memory
+                        for batch_start in range(0, total_jobs, batch_size):
+                            batch_end = min(batch_start + batch_size, total_jobs)
+                            current_batch = jobs_to_process[batch_start:batch_end]
                             
-                            try:
-                                # Process job description
-                                job_id = job_agent.process_job_description(row['title'], row['description'])
-                                job_results.append({
-                                    "id": job_id,
-                                    "title": row['title'],
-                                    "status": "success"
-                                })
-                            except Exception as e:
-                                job_results.append({
-                                    "id": None,
-                                    "title": row['title'],
-                                    "status": f"error: {str(e)}"
-                                })
+                            # Process batch
+                            batch_results = []
+                            for i, job in enumerate(current_batch):
+                                job_index = batch_start + i
+                                try:
+                                    # Update progress
+                                    progress = (job_index + 0.5) / total_jobs
+                                    progress_bar.progress(progress)
+                                    status_text.text(f"Processing job {job_index+1}/{total_jobs}: {job['title']}")
+                                    
+                                    # Process job description
+                                    job_id = job_agent.process_job_description(job['title'], job['description'])
+                                    batch_results.append({
+                                        "id": job_id,
+                                        "title": job['title'],
+                                        "status": "success"
+                                    })
+                                except Exception as e:
+                                    batch_results.append({
+                                        "id": None,
+                                        "title": job['title'],
+                                        "status": f"error: {str(e)}"
+                                    })
+                            
+                            # Update results and progress
+                            job_results.extend(batch_results)
+                            progress = (batch_end) / total_jobs
+                            progress_bar.progress(progress)
+                            status_text.text(f"Processed {batch_end}/{total_jobs} jobs")
                         
                         # Complete progress
                         progress_bar.progress(100)
-                        status_text.text(f"Processed {len(job_df)} job descriptions!")
+                        status_text.text(f"Processed {total_jobs} job descriptions!")
                         
                         # Refresh jobs list
                         refresh_jobs()
@@ -914,46 +956,60 @@ elif page == "Schedule Interviews":
                     emails_generated = 0
                     errors = []
                     
-                    # Generate emails for all shortlisted candidates
-                    for i, candidate in enumerate(shortlisted):
-                        progress = (i + 1) / len(shortlisted)
-                        progress_bar.progress(progress)
-                        status_text.text(f"Generating email for {candidate['name']}...")
+                    # Get match IDs of candidates that need emails
+                    match_ids = [c["match_id"] for c in shortlisted if not c["email_sent"]]
+                    
+                    if match_ids:
+                        status_text.text(f"Generating emails for {len(match_ids)} candidates...")
                         
-                        if not candidate["email_sent"]:
-                            try:
-                                # Generate email and assessment
-                                email_content, assessment_path = interview_agent.generate_interview_email(
-                                    candidate["match_id"], company_name
-                                )
+                        try:
+                            # Use the new optimized bulk method
+                            results = interview_agent.generate_bulk_emails(match_ids, company_name)
+                            
+                            # Process results and move assessment files
+                            for i, result in enumerate(results):
+                                # Update progress
+                                progress = (i + 1) / len(results)
+                                progress_bar.progress(progress)
                                 
-                                # Move assessment to specified directory if it was created
-                                if assessment_path and os.path.exists(assessment_path):
-                                    new_path = os.path.join(assessment_dir, os.path.basename(assessment_path))
-                                    try:
-                                        os.rename(assessment_path, new_path)
-                                        assessments_created.append((candidate["name"], new_path))
-                                    except Exception as e:
-                                        errors.append(f"Error moving assessment for {candidate['name']}: {str(e)}")
-                                        st.error(f"Error moving assessment for {candidate['name']}: {str(e)}")
-                                
-                                # Store email in session state for display
-                                key = f"email_{candidate['match_id']}"
-                                st.session_state[key] = email_content
-                                emails_generated += 1
-                                
-                            except Exception as e:
-                                errors.append(f"Error processing {candidate['name']}: {str(e)}")
-                                status_text.text(f"Error with {candidate['name']}: {str(e)}")
-                                time.sleep(1)  # Brief pause to show the error
-                    
-                    # Complete the progress
-                    progress_bar.progress(100)
-                    
+                                if result["status"] == "success":
+                                    # Get candidate name
+                                    candidate = next((c for c in shortlisted if c["match_id"] == result["match_id"]), None)
+                                    candidate_name = candidate["name"] if candidate else f"Candidate {result['match_id']}"
+                                    
+                                    # Store email in session state
+                                    key = f"email_{result['match_id']}"
+                                    st.session_state[key] = result["email"]
+                                    emails_generated += 1
+                                    
+                                    # Move assessment if created
+                                    assessment_path = result.get("assessment_path")
+                                    if assessment_path and os.path.exists(assessment_path):
+                                        new_path = os.path.join(assessment_dir, os.path.basename(assessment_path))
+                                        try:
+                                            os.rename(assessment_path, new_path)
+                                            assessments_created.append((candidate_name, new_path))
+                                        except Exception as e:
+                                            errors.append(f"Error moving assessment for {candidate_name}: {str(e)}")
+                                else:
+                                    errors.append(result["status"])
+                                    
+                            # Complete progress
+                            progress_bar.progress(100)
+                            
+                        except Exception as e:
+                            errors.append(f"Error in bulk processing: {str(e)}")
+                            status_text.error(f"Error: {str(e)}")
+                            
+                        # Refresh matches
+                        refresh_matches(job_id)
+                    else:
+                        status_text.info("No candidates need emails. All selected candidates already have emails sent.")
+                        
                     # Report results
                     if emails_generated > 0:
-                        status_text.text(f"Generated {emails_generated} out of {len(shortlisted)} emails successfully!")
-                    else:
+                        status_text.text(f"Generated {emails_generated} out of {len(match_ids)} emails successfully!")
+                    elif match_ids:
                         status_text.error("Failed to generate any emails. Please check the errors and try again.")
                     
                     # Show assessment files created
@@ -967,9 +1023,6 @@ elif page == "Schedule Interviews":
                         with st.expander(f"Errors ({len(errors)})", expanded=False):
                             for error in errors:
                                 st.error(error)
-                    
-                    # Refresh matches
-                    refresh_matches(job_id)
             
             # Display each shortlisted candidate
             for candidate in shortlisted:

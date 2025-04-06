@@ -4,6 +4,8 @@ import os
 import tempfile
 import asyncio
 import time
+import sqlite3
+import pandas as pd
 from database import Database
 from models import OllamaModels
 from agents import (
@@ -144,6 +146,31 @@ def update_progress_callback(current, total, name=None, status=None):
         "status": status
     }
 
+# Function to get unique job types from the database
+def get_job_types():
+    try:
+        conn = sqlite3.connect(db.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT summary FROM jobs WHERE summary IS NOT NULL")
+        job_summaries = cursor.fetchall()
+        conn.close()
+        
+        job_types = set()
+        for summary_row in job_summaries:
+            if summary_row[0]:
+                try:
+                    summary = json.loads(summary_row[0])
+                    if 'job_type' in summary and summary['job_type']:
+                        job_types.add(summary['job_type'])
+                except json.JSONDecodeError:
+                    continue
+        
+        # Return sorted list of job types with "All" as first option
+        return ["All"] + sorted(list(job_types))
+    except Exception as e:
+        print(f"Error getting job types: {e}")
+        return ["All", "Full-time", "Part-time", "Contract", "Internship"]
+
 # Page: Process Job Description
 if page == "Process Job Description":
     st.header("Process Job Description")
@@ -154,26 +181,42 @@ if page == "Process Job Description":
     with job_tab1:
         # Form to submit job description
         with st.form("job_form"):
-            job_title = st.text_input("Job Title")
-            job_description = st.text_area("Job Description", height=300)
+            job_title = st.text_input("Job Title", key="job_title")
+            job_type = st.text_input("Job Type", value="Full-time", key="job_type")
+            job_description = st.text_area("Job Description", height=300, key="job_desc")
             submitted = st.form_submit_button("Process Job")
         
         if submitted and job_title and job_description:
             with st.spinner("Processing job description..."):
-                job_id = job_agent.process_job_description(job_title, job_description)
-                
-                # Get the summary from the database
-                cursor = db.conn.cursor()
-                cursor.execute("SELECT summary FROM jobs WHERE id = ?", (job_id,))
-                summary_json = cursor.fetchone()[0]
-                summary = json.loads(summary_json)
-                
-                st.success(f"Job processed successfully! Job ID: {job_id}")
-                refresh_jobs()
-                
-                # Display the summary
-                st.subheader("Generated Job Summary")
-                st.json(summary)
+                try:
+                    job_id = job_agent.process_job_description(job_title, job_description)
+                    
+                    # Update job type if not already detected in processing
+                    conn = sqlite3.connect(db.db_path)
+                    c = conn.cursor()
+                    c.execute("SELECT summary FROM jobs WHERE id = ?", (job_id,))
+                    summary_row = c.fetchone()
+                    
+                    if summary_row and summary_row[0]:
+                        try:
+                            summary = json.loads(summary_row[0])
+                            if 'job_type' not in summary or not summary['job_type']:
+                                summary['job_type'] = job_type
+                                c.execute("UPDATE jobs SET summary = ? WHERE id = ?", 
+                                         (json.dumps(summary), job_id))
+                                conn.commit()
+                        except json.JSONDecodeError:
+                            pass
+                    conn.close()
+                    
+                    st.success(f"Job processed successfully! Job ID: {job_id}")
+                    refresh_jobs()
+                    
+                    # Display the summary
+                    st.subheader("Generated Job Summary")
+                    st.json(summary)
+                except Exception as e:
+                    st.error(f"Error processing job: {str(e)}")
     
     with job_tab2:
         st.subheader("Import Multiple Job Descriptions from CSV")
@@ -586,15 +629,135 @@ elif page == "Candidate Matching":
     st.header("Match Candidates with Jobs")
     
     # Refresh job and candidate lists
-    refresh_jobs()
-    refresh_candidates()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Refresh Jobs"):
+            refresh_jobs()
+    with col2:
+        if st.button("Refresh Candidates"):
+            refresh_candidates()
     
-    # Select job and candidates for matching
-    job_options = [f"{job['id']} - {job['title']}" for job in st.session_state.jobs]
+    # Get job type filter options
+    job_types = get_job_types()
+    selected_job_type = st.selectbox("Filter Jobs by Type", job_types, index=0)
+    
+    # Apply job type filter for displayed jobs
+    displayed_jobs = st.session_state.jobs
+    if selected_job_type != "All":
+        displayed_jobs = [
+            job for job in st.session_state.jobs 
+            if job.get("summary") and isinstance(job.get("summary"), str) and 
+            json.loads(job.get("summary", '{}')).get('job_type') == selected_job_type
+        ]
+    
+    # Global match section (match all with all)
+    st.markdown("## Global Matching")
+    st.markdown("Match all candidates with all jobs in a single operation.")
+    
+    if st.button("Match All Candidates with All Jobs"):
+        if not st.session_state.jobs or not st.session_state.candidates:
+            st.warning("Need both jobs and candidates in the database to perform global matching.")
+        else:
+            # Get all job IDs and candidate IDs - only for the filtered job type if selected
+            job_ids = [job["id"] for job in displayed_jobs]
+            candidate_ids = [c["id"] for c in st.session_state.candidates]
+            
+            # Calculate total operations
+            total_operations = len(job_ids) * len(candidate_ids)
+            
+            # Setup progress tracking
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            status_text.text(f"Starting global matching: {total_operations} total matches to perform")
+            
+            # Store results
+            match_results = []
+            completed_count = 0  # Track global completion
+            
+            # Process each job
+            for job_idx, job_id in enumerate(job_ids):
+                job_title = next((job["title"] for job in st.session_state.jobs if job["id"] == job_id), f"Job {job_id}")
+                
+                # Update status for this job
+                status_text.text(f"Processing Job {job_idx+1}/{len(job_ids)}: {job_title}")
+                
+                # Create a progress tracking function for this job
+                def job_progress_callback(completed_candidates, total_candidates):
+                    # Access the outer variable directly without nonlocal
+                    # since it's defined in the same scope
+                    global completed_count 
+                    completed_count += 1
+                    progress = completed_count / total_operations
+                    progress_bar.progress(progress)
+                    status_text.text(f"Job {job_idx+1}/{len(job_ids)}: {job_title} - " 
+                                   f"Matched {completed_candidates}/{total_candidates} candidates")
+                
+                # Match all candidates with this job
+                job_results = cv_agent.bulk_match_candidates(job_id, candidate_ids, job_progress_callback)
+                match_results.append({
+                    "job_id": job_id,
+                    "job_title": job_title,
+                    "results": job_results
+                })
+            
+            # Complete progress
+            progress_bar.progress(100)
+            status_text.text(f"Global matching complete! Processed {total_operations} matches.")
+            
+            # Display summary statistics
+            st.subheader("Matching Summary")
+            
+            # Calculate statistics
+            jobs_matched = len(match_results)
+            candidates_matched = len(candidate_ids)
+            total_matches = sum(len(job["results"]) for job in match_results)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Jobs Processed", jobs_matched)
+            with col2:
+                st.metric("Candidates Processed", candidates_matched)
+            with col3:
+                st.metric("Total Matches Created", total_matches)
+                
+            # Option to view detailed results
+            with st.expander("View Detailed Results", expanded=False):
+                for job_result in match_results:
+                    st.markdown(f"### {job_result['job_title']}")
+                    
+                    # Create dataframe for this job's matches
+                    job_matches = {
+                        "Candidate": [],
+                        "Score": [],
+                        "Status": []
+                    }
+                    
+                    for match in job_result["results"]:
+                        job_matches["Candidate"].append(match["name"])
+                        
+                        # Format score consistently
+                        if "score" in match:
+                            score = match["score"]
+                            job_matches["Score"].append(f"{score:.2f}" if score > 1 else f"{score*100:.2f}%")
+                        else:
+                            job_matches["Score"].append("N/A")
+                            
+                        job_matches["Status"].append(match["status"])
+                    
+                    st.dataframe(job_matches)
+                    st.markdown("---")
+    
+    st.markdown("---")
+    
+    # Original job-specific matching
+    st.markdown("## Job-Specific Matching")
+    
+    # Create job options from filtered jobs
+    job_options = [f"{job['id']} - {job['title']}" for job in displayed_jobs]
     candidate_options = [f"{c['id']} - {c['name']}" for c in st.session_state.candidates]
     
     if not job_options:
-        st.warning("No jobs available. Please add a job first.")
+        st.warning(f"No jobs available{' with the selected job type' if selected_job_type != 'All' else ''}. Please add a job first or select a different filter.")
     elif not candidate_options:
         st.warning("No candidates available. Please add candidates first.")
     else:
@@ -1295,7 +1458,6 @@ elif page == "Analytics Dashboard":
                             "Type": ["Matching"] * len(skill_names) + ["Missing"] * len(skill_names)
                         }
                         
-                        import pandas as pd
                         skill_df = pd.DataFrame(skill_chart_data)
                         
                         # Display skill chart
